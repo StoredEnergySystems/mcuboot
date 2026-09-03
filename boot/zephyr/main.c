@@ -4,6 +4,7 @@
  * Copyright (c) 2021-2023 Nordic Semiconductor ASA
  * Copyright (c) 2025 Aerlync Labs Inc.
  * Copyright (c) 2025 Siemens Mobility GmbH
+ * Copyright (c) 2026 Stored Energy Systems
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +17,8 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ *
+ * Modified 2026 Stored Energy Systems
  */
 
 #include <errno.h>
@@ -40,6 +43,10 @@
 
 #ifdef MCUBOOT_SERIAL_INACTIVITY_TIMEOUT
 #include <zephyr/sys/reboot.h>
+#endif
+
+#if defined(CONFIG_BOOT_STAGE1_SERVICES_API)
+#include "stage1_services_publish.h"
 #endif
 
 #if defined(CONFIG_MCUBOOT_UUID_VID) || defined(CONFIG_MCUBOOT_UUID_CID)
@@ -420,6 +427,11 @@ int main(void)
 #endif
 
     mcuboot_status_change(MCUBOOT_STATUS_BOOTABLE_IMAGE_FOUND);
+
+#if defined(CONFIG_BOOT_STAGE1_SERVICES_API)
+    /* Publish the services-API locator for the next stage before jumping. */
+    stage1_services_publish();
+#endif
 
     ZEPHYR_BOOT_LOG_STOP();
     do_boot(&rsp);

@@ -3,6 +3,8 @@
 # Copyright (c) 2017 Open Source Foundries Limited
 # Copyright (c) 2023-2026 Nordic Semiconductor ASA
 #
+# Modified 2026 Stored Energy Systems
+#
 # SPDX-License-Identifier: Apache-2.0
 
 cmake_minimum_required(VERSION 3.13.1)
@@ -87,6 +89,12 @@ endif()
 
 if(CONFIG_BOOT_SHARE_BACKEND_RETENTION)
   zephyr_sources(shared_data.c)
+endif()
+
+if(CONFIG_BOOT_STAGE1_SERVICES_API)
+  # bootutil/src for bootutil_priv.h (BOOT_IMG_MAGIC).
+  zephyr_include_directories(${BOOT_DIR}/bootutil/src)
+  zephyr_sources(${CMAKE_CURRENT_LIST_DIR}/stage1_services_api.c)
 endif()
 
 # Generic bootutil sources and includes.

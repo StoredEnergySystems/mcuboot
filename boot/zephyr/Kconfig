@@ -1463,6 +1463,19 @@ config MCUBOOT_VERIFY_LOGICAL_SECTORS
 	  Validation of logical sector size against hardware constraints. Should be used to
 	  validate compile-time configuration against run-time system.
 
+config BOOT_STAGE1_SERVICES_API
+	bool "Publish the Stage 1 services API (crypto/swap) locator"
+	depends on BOOT_SHARE_DATA && BOOT_SHARE_BACKEND_RETENTION
+	select CRC
+	help
+	  Build boot/zephyr/stage1_services_api.c: a const function table in
+	  immutable flash (SHA-256, ECDSA-P256 verify, and a resumable
+	  swap-using-offset exchange - mechanism only, no signature check) plus
+	  a locator (address + CRC + mirrored magic/version) written into the
+	  bl_shared_data area under TLV major 0x3 / minor 0x3 just before jump.
+	  A later boot stage reads and validates the locator and calls through
+	  the table.
+
 config MCUBOOT_LOGICAL_SECTOR_SIZE_EXPERIMENTAL
 	bool
 	default y if MCUBOOT_LOGICAL_SECTOR_SIZE != 0x0
