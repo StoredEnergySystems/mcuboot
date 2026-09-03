@@ -34,7 +34,7 @@
 #include "bootutil/boot_record.h"
 #include "bootutil/bootutil_log.h"
 #include "bootutil/bootutil_public.h" /* BOOT_MAGIC_SZ, BOOT_MAX_ALIGN */
-#include "bootutil/bootutil_priv.h"   /* BOOT_IMG_MAGIC (boot_img_magic, .rodata) */
+#include "bootutil_priv.h"   /* BOOT_IMG_MAGIC (boot_img_magic, .rodata) */
 #include "bootutil/crypto/ecdsa.h"
 #include "bootutil/crypto/sha.h"
 #include "mcuboot_config/mcuboot_config.h"
@@ -55,11 +55,11 @@ static int s1_sha256_init(struct stage1_sha256_ctx* ctx) {
 
 static int s1_sha256_update(struct stage1_sha256_ctx* ctx, const uint8_t* in,
                             size_t len) {
-  return bootutil_sha_update((bootutil_sha_context*)ctx, in, len) ? -EIO : 0;
+  return bootutil_sha_update((bootutil_sha_context*)ctx, in, len) ? 0 : -EIO;
 }
 
 static int s1_sha256_final(struct stage1_sha256_ctx* ctx, uint8_t out[32]) {
-  return bootutil_sha_finish((bootutil_sha_context*)ctx, out) ? -EIO : 0;
+  return bootutil_sha_finish((bootutil_sha_context*)ctx, out) ? 0 : -EIO;
 }
 
 static int s1_sha256(const uint8_t* in, size_t len, uint8_t out[32]) {
@@ -73,7 +73,7 @@ static int s1_sha256(const uint8_t* in, size_t len, uint8_t out[32]) {
     rc = bootutil_sha_finish(&c, out);
   }
   bootutil_sha_drop(&c);
-  return rc ? -EIO : 0;
+  return rc ? 0 : -EIO;
 }
 
 /* ---- ECDSA-P256 verify ----
