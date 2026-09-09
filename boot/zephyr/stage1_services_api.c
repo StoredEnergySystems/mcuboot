@@ -115,6 +115,11 @@ static int s1_ecdsa_p256_verify(const uint8_t hash[32], const uint8_t* sig,
  * sector, which the body loop never touches; on re-entry the journal says
  * which sector to resume from. Caller runs single-threaded in bootloader
  * context; signature validation is the caller's job, before and after.
+ *
+ * swap_state()/swap_run() run in the CALLER's context after the jump, so -
+ * like the crypto entries - they must touch NOTHING with MCUboot-side RAM
+ * state: no flash driver (hence `ops`), and NO BOOT_LOG_* (the log runtime's
+ * filters/ring buffer/lock are dead RAM here - a single call faults).
  */
 
 #define SWAP_STAT_MAGIC 0x53575031u /* "SWP1" */
@@ -319,10 +324,14 @@ static int s1_swap_run(const struct stage1_flash_ops* ops, uint32_t pri_off,
     return -EIO;
   }
 
+  /* NB: no BOOT_LOG_* anywhere below this point. swap_state()/swap_run()
+   * execute in the CALLER's context after the jump, where MCUboot's own
+   * logging runtime (filter arrays, deferred ring buffer, log-core lock) is
+   * dead RAM - a single log call faults. Report via return code only; the
+   * caller (with a live logging subsystem) does the logging. */
   uint32_t start_idx, slot, seq;
   if (_swap_hdr_valid(&h, pri_off, pri_size, sec_off, sec_size)) {
     _swap_scan_log(ops, log_base, log_limit, &start_idx, &slot, &seq);
-    BOOT_LOG_WRN("stage1 swap: resume at sector %u/%u", start_idx, iterations);
   } else {
     rc = ops->erase(log_base, sector); /* clears any stale trailer too */
     if (rc) {
@@ -351,8 +360,7 @@ static int s1_swap_run(const struct stage1_flash_ops* ops, uint32_t pri_off,
     uint32_t eoff = log_base + sizeof(struct swap_stat_hdr) +
                     slot * sizeof(struct swap_stat_entry);
     if (eoff + sizeof(struct swap_stat_entry) > log_limit) {
-      BOOT_LOG_ERR("stage1 swap: status log full");
-      return -ENOSPC;
+      return -ENOSPC; /* status log sector full (see re-entry note above) */
     }
     struct swap_stat_entry e = {0};
     e.idx = (uint16_t)idx;
@@ -381,7 +389,6 @@ static int s1_swap_run(const struct stage1_flash_ops* ops, uint32_t pri_off,
 
   rc = _swap_write_primary_trailer(ops, pri_off, pri_size, sector, flags);
   if (rc) {
-    BOOT_LOG_ERR("stage1 swap: primary trailer write failed (%d)", rc);
     return rc;
   }
 
@@ -397,7 +404,6 @@ static int s1_swap_run(const struct stage1_flash_ops* ops, uint32_t pri_off,
       return -EIO;
     }
   }
-  BOOT_LOG_INF("stage1 swap: complete (%u sectors)", iterations);
   return 0;
 }
 
