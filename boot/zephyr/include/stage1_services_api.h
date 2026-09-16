@@ -31,16 +31,15 @@
 #ifndef STAGE1_SERVICES_API_H_
 #define STAGE1_SERVICES_API_H_
 
+#include <bootutil/image.h> /* struct image_header */
 #include <stddef.h>
 #include <stdint.h>
-
-#include <bootutil/image.h> /* struct image_header */
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define STAGE1_SVC_ABI_MAGIC   0x53315356u /* "S1SV" */
+#define STAGE1_SVC_ABI_MAGIC 0x53315356u /* "S1SV" */
 #define STAGE1_SVC_ABI_VERSION 1u
 
 /* TLV coordinates of the locator in the bl_shared_data area. Mirror of
@@ -50,8 +49,8 @@ extern "C" {
 #define STAGE1_SVC_TLV_MINOR 0x3u
 
 /* capabilities bitmask */
-#define STAGE1_CAP_SHA256      (1u << 0)
-#define STAGE1_CAP_ECDSA_P256  (1u << 1)
+#define STAGE1_CAP_SHA256 (1u << 0)
+#define STAGE1_CAP_ECDSA_P256 (1u << 1)
 #define STAGE1_CAP_SWAP_OFFSET (1u << 2)
 
 /* Caller-owned SHA-256 streaming context. Opaque; sized generously so the
@@ -70,14 +69,16 @@ struct stage1_sha256_ctx {
  * fits (i.e. scratch_len < 16). */
 #define STAGE1_SWAP_SCRATCH_BYTES 2048
 
-enum stage1_swap_state {
-  STAGE1_SWAP_NONE = 0,        /* no pending or interrupted swap */
-  STAGE1_SWAP_PENDING = 1,     /* secondary marked, swap not started */
-  STAGE1_SWAP_IN_PROGRESS = 2, /* interrupted swap - resume needed */
-};
+typedef enum {
+  STAGE1_SWAP_DISABLED = 0,   /* no swap operations enabled */
+  STAGE1_SWAP_NONE = 1,       /* no pending or interrupted swap */
+  STAGE1_SWAP_PENDING = 2,    /* secondary marked, swap not started */
+  STAGE1_SWAP_IN_PROGRESS = 3 /* interrupted swap - resume needed */
+} stage1_swap_state_t;
 
 /* swap_run() flags */
-#define STAGE1_SWAP_F_PERMANENT (1u << 0) /* also write image_ok=SET on primary */
+#define STAGE1_SWAP_F_PERMANENT \
+  (1u << 0) /* also write image_ok=SET on primary */
 
 /* Caller-supplied flash I/O for swap_state()/swap_run(). REQUIRED: the swap
  * runs in the caller's context after the jump, where Stage 1's own flash
@@ -87,8 +88,8 @@ enum stage1_swap_state {
  * must be sector-aligned; write offset/len must be write-block-aligned.
  * Each returns 0 or a negative errno. */
 struct stage1_flash_ops {
-  int (*read)(uint32_t off, void *dst, uint32_t len);
-  int (*write)(uint32_t off, const void *src, uint32_t len);
+  int (*read)(uint32_t off, void* dst, uint32_t len);
+  int (*write)(uint32_t off, const void* src, uint32_t len);
   int (*erase)(uint32_t off, uint32_t len);
 };
 
@@ -99,13 +100,13 @@ struct stage1_services_api {
   uint32_t capabilities; /* STAGE1_CAP_* */
 
   /* ---- crypto: stateless one-shot / caller-owned streaming ctx ---- */
-  int (*sha256)(const uint8_t *in, size_t len, uint8_t out[32]);
-  int (*sha256_init)(struct stage1_sha256_ctx *ctx);
-  int (*sha256_update)(struct stage1_sha256_ctx *ctx, const uint8_t *in,
+  int (*sha256)(const uint8_t* in, size_t len, uint8_t out[32]);
+  int (*sha256_init)(struct stage1_sha256_ctx* ctx);
+  int (*sha256_update)(struct stage1_sha256_ctx* ctx, const uint8_t* in,
                        size_t len);
-  int (*sha256_final)(struct stage1_sha256_ctx *ctx, uint8_t out[32]);
-  int (*ecdsa_p256_verify)(const uint8_t hash[32], const uint8_t *sig,
-                           size_t sig_len, const uint8_t *pub, size_t pub_len);
+  int (*sha256_final)(struct stage1_sha256_ctx* ctx, uint8_t out[32]);
+  int (*ecdsa_p256_verify)(const uint8_t hash[32], const uint8_t* sig,
+                           size_t sig_len, const uint8_t* pub, size_t pub_len);
 
   /* ---- swap / resume: MECHANISM ONLY, no signature check ----
    * Bootloader context only (caller runs single-threaded, pre-jump, with no
@@ -117,15 +118,16 @@ struct stage1_services_api {
    * swap_run() rewrites the primary slot's MCUboot trailer (magic, +image_ok
    * if STAGE1_SWAP_F_PERMANENT) itself via ops; the caller's boot_swap_type()
    * then reads NONE and the app confirms the new image. */
-  int (*swap_state)(const struct stage1_flash_ops *ops, uint32_t pri_off,
+  int (*swap_state)(const struct stage1_flash_ops* ops, uint32_t pri_off,
                     uint32_t pri_size, uint32_t sec_off,
                     uint32_t sec_size); /* -> enum stage1_swap_state / -errno */
-  int (*swap_run)(const struct stage1_flash_ops *ops, uint32_t pri_off,
+  int (*swap_run)(const struct stage1_flash_ops* ops, uint32_t pri_off,
                   uint32_t pri_size, uint32_t sec_off, uint32_t sec_size,
-                  uint32_t flags, void *scratch, size_t scratch_len,
-                  struct image_header *primary_hdr_out);
+                  uint32_t flags, void* scratch, size_t scratch_len,
+                  struct image_header* primary_hdr_out);
 
-  uint32_t reserved[8]; /* zero-filled; additive growth without breaking old readers */
+  uint32_t reserved[8]; /* zero-filled; additive growth without breaking old
+                           readers */
 };
 
 #define STAGE1_SVC_TLV_VERSION 1u
