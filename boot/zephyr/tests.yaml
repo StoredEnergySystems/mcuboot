@@ -61,14 +61,9 @@ tests:
       - CONFIG_BOOT_SERIAL_IMG_GRP_IMAGE_STATE=y
       - CONFIG_BOOT_SERIAL_IMG_GRP_SLOT_INFO=y
   sample.bootloader.mcuboot.usb_cdc_acm_recovery:
-    platform_allow:
-      - nrf52840dongle/nrf52840
-    integration_platforms:
-      - nrf52840dongle/nrf52840
     extra_args:
       - EXTRA_CONF_FILE="usb_cdc_acm_recovery.conf"
-      - EXTRA_DTC_OVERLAY_FILE="usb_cdc_acm.overlay"
-      - FILE_SUFFIX="usb_cdc_acm"
+      - FILE_SUFFIX="big"
     extra_configs:
       - CONFIG_DEPRECATION_TEST=y
   sample.bootloader.mcuboot.usb_cdc_acm_recovery_log:
@@ -77,6 +72,10 @@ tests:
       - FILE_SUFFIX="big"
     extra_configs:
       - CONFIG_DEPRECATION_TEST=y
+  sample.bootloader.mcuboot.usb_dfu:
+    extra_args:
+      - EXTRA_CONF_FILE="usb_dfu.conf"
+      - FILE_SUFFIX="big"
   sample.bootloader.mcuboot.single_slot:
     extra_args:
       - EXTRA_CONF_FILE="single_slot.conf"
@@ -91,11 +90,12 @@ tests:
       - TEST_BOOT_IMAGE_ACCESS_HOOKS=Y
   sample.bootloader.mcuboot.ram_load:
     extra_args:
+      - FILE_SUFFIX="ram_load"
       - EXTRA_CONF_FILE="ram_load.conf"
     platform_allow:
-      - mimxrt1020_evk
+      - mimxrt1050_evk/mimxrt1052/hyperflash
     integration_platforms:
-      - mimxrt1020_evk
+      - mimxrt1050_evk/mimxrt1052/hyperflash
   sample.bootloader.mcuboot.swap_move:
     extra_args:
       - EXTRA_CONF_FILE="swap_move.conf"

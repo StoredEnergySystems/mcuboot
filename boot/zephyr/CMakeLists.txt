@@ -79,6 +79,8 @@ if(CONFIG_ARM)
   target_sources(app PRIVATE arch/arm.c)
 elseif(CONFIG_SOC_FAMILY_ESPRESSIF_ESP32)
   target_sources(app PRIVATE arch/esp32.c)
+elseif(CONFIG_RISCV)
+  target_sources(app PRIVATE arch/riscv.c)
 elseif(CONFIG_XTENSA)
   target_sources(app PRIVATE arch/xtensa.c)
 elseif(CONFIG_ARC)
@@ -336,6 +338,14 @@ if(CONFIG_MCUBOOT_SERIAL)
       zephyr_sources(boot_serial_extension_zephyr_basic.c)
     endif()
   endif()
+
+  if(CONFIG_BOOT_SERIAL_CDC_ACM)
+    zephyr_sources(usbd_cdc_serial.c)
+  endif()
+endif()
+
+if(CONFIG_BOOT_USB_DFU)
+  zephyr_sources(usbd_dfu.c)
 endif()
 
 if(NOT CONFIG_BOOT_SIGNATURE_TYPE_NONE AND NOT CONFIG_BOOT_BUILTIN_KEY AND NOT

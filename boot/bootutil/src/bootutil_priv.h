@@ -439,6 +439,91 @@ static inline bool boot_u32_safe_add(uint32_t *dest, uint32_t a, uint32_t b)
 }
 
 /**
+ * Validate header size fields and that header + payload (+ protected TLVs)
+ * fit in the flash slot.  Mirrors boot_check_header_valid() sizing rules.
+ */
+static inline bool
+bootutil_image_hdr_sizes_valid(const struct image_header *hdr,
+                              const struct flash_area *fap,
+                              int image_index)
+{
+    uint32_t size;
+
+    if (hdr == NULL || fap == NULL) {
+        return false;
+    }
+
+#if !defined(MCUBOOT_DECOMPRESS_IMAGES)
+    (void)image_index;
+#endif
+
+    if (hdr->ih_hdr_size < IMAGE_HEADER_SIZE) {
+        return false;
+    }
+
+    if (!boot_u32_safe_add(&size, hdr->ih_img_size, hdr->ih_hdr_size)) {
+        return false;
+    }
+
+#if defined(MCUBOOT_DECOMPRESS_IMAGES)
+    if (!MUST_DECOMPRESS(fap, image_index, hdr)) {
+#else
+    if (1) {
+#endif
+        if (!boot_u32_safe_add(&size, size, hdr->ih_protect_tlv_size)) {
+            return false;
+        }
+    }
+
+    if (size >= flash_area_get_size(fap)) {
+        return false;
+    }
+
+    return true;
+}
+
+/**
+ * Validate BOOT_TLV_OFF (+ optional swap offset) and that the TLV info header
+ * lies within the flash slot.
+ */
+static inline bool
+bootutil_image_tlv_off_valid_set(uint32_t *tlv_off_out,
+                                 const struct image_header *hdr,
+                                 const struct flash_area *fap,
+                                 uint32_t start_off)
+{
+    uint32_t off_;
+    uint32_t end;
+
+    if (tlv_off_out == NULL || hdr == NULL || fap == NULL) {
+        return false;
+    }
+
+    if (hdr->ih_hdr_size < IMAGE_HEADER_SIZE) {
+        return false;
+    }
+
+    if (!boot_u32_safe_add(&off_, hdr->ih_hdr_size, hdr->ih_img_size)) {
+        return false;
+    }
+
+    if (!boot_u32_safe_add(&off_, off_, start_off)) {
+        return false;
+    }
+
+    if (!boot_u32_safe_add(&end, off_, sizeof(struct image_tlv_info))) {
+        return false;
+    }
+
+    if (end > flash_area_get_size(fap)) {
+        return false;
+    }
+
+    *tlv_off_out = off_;
+    return true;
+}
+
+/**
  * Safe (non-overflowing) uint16_t addition.  Returns true, and stores
  * the result in *dest if it can be done without overflow.  Otherwise,
  * returns false.
@@ -593,9 +678,26 @@ struct bootsim_ram_info *bootsim_get_ram_info(void);
 #       define IMAGE_RAM_BASE ((uintptr_t)0)
 #   endif
 
-#define LOAD_IMAGE_DATA(hdr, fap, start, output, size)       \
+#define LOAD_IMAGE_DATA_RAM(hdr, fap, start, output, size)                    \
     (memcpy((output),(void*)(IMAGE_RAM_BASE + (hdr)->ih_load_addr + (start)), \
     (size)), 0)
+
+#ifdef MCUBOOT_SERIAL
+void boot_init_image_data_in_ram(void);
+fih_ret boot_image_data_in_ram(void);
+void boot_set_image_data_in_nvm(void);
+
+#define LOAD_IMAGE_DATA_NVM(hdr, fap, start, output, size)       \
+    (flash_area_read((fap), (start), (output), (size)))
+
+#define LOAD_IMAGE_DATA(hdr, fap, start, output, size)                              \
+    FIH_NOT_EQ(boot_image_data_in_ram(), FIH_NEGATIVE_VALUE) ? \
+                   LOAD_IMAGE_DATA_RAM(hdr, fap, start, output, size) : \
+                   LOAD_IMAGE_DATA_NVM(hdr, fap, start, output, size)
+#else
+#define LOAD_IMAGE_DATA(hdr, fap, start, output, size) \
+        LOAD_IMAGE_DATA_RAM(hdr, fap, start, output, size)
+#endif /* MCUBOOT_SERIAL */
 
 int boot_load_image_to_sram(struct boot_loader_state *state);
 #else

@@ -20,7 +20,8 @@
 #include <string.h>
 #include <zephyr/kernel.h>
 #include "bootutil/bootutil_log.h"
-#include <zephyr/usb/usb_device.h>
+#include "mcuboot_config/mcuboot_config.h"
+#include <zephyr/usb/usbd.h>
 
 #if defined(CONFIG_BOOT_SERIAL_UART) && defined(CONFIG_UART_CONSOLE) && \
     (!DT_HAS_CHOSEN(zephyr_uart_mcumgr) ||                              \
@@ -38,6 +39,26 @@
 #if defined(CONFIG_BOOT_SERIAL_CDC_ACM) && CONFIG_MAIN_THREAD_PRIORITY < 0
 #error CONFIG_MAIN_THREAD_PRIORITY must be preemptible to support USB CDC ACM \
        (0 or above)
+#endif
+
+#if defined(CONFIG_BOOT_SERIAL_CDC_ACM)
+#include "usbd_cdc_serial.h"
+
+/* How often to wake while waiting for the USB host to open the port. The
+ * serial recovery loop that normally feeds the watchdog is not reached until
+ * that wait returns, so this has to stay well below any watchdog timeout.
+ */
+#define BOOT_CDC_ACM_POLL_MS 100
+
+#if defined(CONFIG_BOOT_SERIAL_WAIT_FOR_DFU)
+/* The caller only intends to wait this long in total, so waiting for the host
+ * must not outlast it.
+ */
+#define BOOT_CDC_ACM_READY_TIMEOUT_MS CONFIG_BOOT_SERIAL_WAIT_FOR_DFU_TIMEOUT
+#else
+/* Recovery was asked for explicitly; wait for the host indefinitely. */
+#define BOOT_CDC_ACM_READY_TIMEOUT_MS 0
+#endif
 #endif
 
 BOOT_LOG_MODULE_REGISTER(serial_adapter);
@@ -62,8 +83,19 @@ static sys_slist_t avail_queue;
 static sys_slist_t lines_queue;
 
 static uint16_t cur;
-#ifndef CONFIG_BOOT_SERIAL_RAW_PROTOCOL
+#ifdef CONFIG_BOOT_SERIAL_RAW_PROTOCOL
+static uint8_t rx_buf[CONFIG_BOOT_MAX_LINE_INPUT_LEN];
+#else
 static uint8_t rx_batch_buf[CONFIG_BOOT_SERIAL_UART_RX_BATCH_SIZE];
+#endif
+
+#if defined(CONFIG_BOOT_SERIAL_CDC_ACM) || defined(CONFIG_BOOT_SERIAL_RAW_PROTOCOL)
+/*
+ * Due to USB CDC ACM having a large write size, which might be more than the available buffers
+ * can hold, this will be set to true when the UART is blocked and should not be read from until
+ * the buffers have been read by the serial recovery code
+ */
+static bool uart_blocked = false;
 #endif
 
 static int boot_uart_fifo_getline(char **line);
@@ -155,7 +187,7 @@ boot_console_init(void)
 	int i;
 
 	/* WAIT_FOR_DFU initializes the console early, then boot_serial_enter()
-	 * initializes it again. Re-running would call usb_enable() a second time
+	 * initializes it again. Re-running would initialize USB a second time
 	 * (returning -EALREADY) and reset the line queues, dropping any bytes
 	 * buffered while waiting. Initialize only once.
 	 */
@@ -195,12 +227,40 @@ boot_uart_fifo_callback(const struct device *dev, void *user_data)
 		return;
 	}
 
-	while (true) {
-#ifdef CONFIG_BOOT_SERIAL_RAW_PROTOCOL
-		uint8_t byte;
+#if defined(CONFIG_BOOT_SERIAL_CDC_ACM) || defined(CONFIG_BOOT_SERIAL_RAW_PROTOCOL)
+	if (uart_blocked == true) {
+		return;
+	}
+#endif
 
-		rx = uart_fifo_read(uart_dev, &byte, 1);
-		if (rx != 1) {
+	while (true) {
+		size_t copy_len = CONFIG_BOOT_MAX_LINE_INPUT_LEN - 1 - cur;
+		size_t free_buffers = sys_slist_len(&avail_queue);
+
+		if (free_buffers > 0 && cmd == NULL) {
+			--free_buffers;
+		}
+
+#ifdef CONFIG_BOOT_SERIAL_RAW_PROTOCOL
+		if (cur == 0 && free_buffers == 0) {
+			uart_blocked = true;
+			uart_irq_rx_disable(uart_dev);
+			return;
+		}
+
+		rx = uart_fifo_read(uart_dev, rx_buf, copy_len);
+		if (rx <= 0) {
+			if (cmd && cur > 0) {
+				/*
+				 * No more data to read, so we assume that it means the packet is
+				 * complete
+				 */
+				cmd->len = cur;
+				sys_slist_append(&lines_queue, &cmd->node);
+				cur = 0;
+				cmd = NULL;
+			}
+
 			break;
 		}
 
@@ -216,7 +276,8 @@ boot_uart_fifo_callback(const struct device *dev, void *user_data)
 			cmd = CONTAINER_OF(node, struct line_input, node);
 		}
 
-		cmd->line[cur++] = byte;
+		memcpy(&cmd->line[cur], rx_buf, rx);
+		cur += rx;
 
 		if (cur >= CONFIG_BOOT_MAX_LINE_INPUT_LEN) {
 			cmd->len = cur;
@@ -225,7 +286,22 @@ boot_uart_fifo_callback(const struct device *dev, void *user_data)
 			cmd = NULL;
 		}
 #else
+#if defined(CONFIG_BOOT_SERIAL_CDC_ACM)
+		size_t max_read_size = free_buffers * (CONFIG_BOOT_MAX_LINE_INPUT_LEN - 1) +
+				       copy_len;
+
+		if (max_read_size > sizeof(rx_batch_buf)) {
+			max_read_size = sizeof(rx_batch_buf);
+		} else if (max_read_size == 0) {
+			uart_blocked = true;
+			uart_irq_rx_disable(uart_dev);
+			return;
+		}
+
+		rx = uart_fifo_read(uart_dev, rx_batch_buf, max_read_size);
+#else
 		rx = uart_fifo_read(uart_dev, rx_batch_buf, sizeof(rx_batch_buf));
+#endif
 		if (rx <= 0) {
 			break;
 		}
@@ -248,8 +324,7 @@ boot_uart_fifo_callback(const struct device *dev, void *user_data)
 
 			const uint8_t *nl = memchr(p, '\n', batch_end - p);
 			size_t chunk = nl ? (size_t)(nl - p + 1) : (size_t)(batch_end - p);
-			size_t room = CONFIG_BOOT_MAX_LINE_INPUT_LEN - cur;
-			size_t copy_len = MIN(chunk, room);
+			copy_len = MIN(chunk, (CONFIG_BOOT_MAX_LINE_INPUT_LEN - cur));
 
 			memcpy(&cmd->line[cur], p, copy_len);
 			cur += copy_len;
@@ -260,6 +335,7 @@ boot_uart_fifo_callback(const struct device *dev, void *user_data)
 				sys_slist_append(&lines_queue, &cmd->node);
 				cur = 0;
 				cmd = NULL;
+
 			}
 		}
 #endif
@@ -283,31 +359,48 @@ boot_uart_fifo_callback(const struct device *dev, void *user_data)
 static int
 boot_uart_fifo_getline(char **line)
 {
-	static struct line_input *cmd;
+	static struct line_input *input_cmd;
 	sys_snode_t *node;
 	int key;
 
+#if defined(CONFIG_BOOT_SERIAL_CDC_ACM) || defined(CONFIG_BOOT_SERIAL_RAW_PROTOCOL)
+	bool unblock = false;
+#endif
+
 	key = irq_lock();
 	/* Recycle cmd buffer returned previous time */
-	if (cmd != NULL) {
-		if (sys_slist_peek_tail(&avail_queue) != &cmd->node) {
-			sys_slist_append(&avail_queue, &cmd->node);
+	if (input_cmd != NULL) {
+		if (sys_slist_peek_tail(&avail_queue) != &input_cmd->node) {
+			sys_slist_append(&avail_queue, &input_cmd->node);
+
+#if defined(CONFIG_BOOT_SERIAL_CDC_ACM) || defined(CONFIG_BOOT_SERIAL_RAW_PROTOCOL)
+			if (uart_blocked) {
+				unblock = true;
+			}
+#endif
 		}
 	}
 
 	node = sys_slist_get(&lines_queue);
 	irq_unlock(key);
 
+#if defined(CONFIG_BOOT_SERIAL_CDC_ACM) || defined(CONFIG_BOOT_SERIAL_RAW_PROTOCOL)
+	if (unblock) {
+		uart_blocked = false;
+		uart_irq_rx_enable(uart_dev);
+	}
+#endif
+
 	if (node == NULL) {
-		cmd = NULL;
+		input_cmd = NULL;
 		*line = NULL;
 
 		return 0;
 	}
 
-	cmd = CONTAINER_OF(node, struct line_input, node);
-	*line = cmd->line;
-	return cmd->len;
+	input_cmd = CONTAINER_OF(node, struct line_input, node);
+	*line = input_cmd->line;
+	return input_cmd->len;
 }
 
 static int
@@ -321,23 +414,9 @@ boot_uart_fifo_init(void)
 	uart_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
 #endif
 
-#elif defined(CONFIG_BOOT_SERIAL_CDC_ACM)
-        uart_dev = DEVICE_DT_GET_ONE(zephyr_cdc_acm_uart);
-#else
-#error No serial recovery device selected
-#endif
-
-
 	if (!device_is_ready(uart_dev)) {
 		return (-1);
 	}
-
-#if CONFIG_BOOT_SERIAL_CDC_ACM
-	int rc = usb_enable(NULL);
-	if (rc) {
-		return (-1);
-	}
-#endif
 
 	uart_irq_callback_set(uart_dev, boot_uart_fifo_callback);
 
@@ -353,6 +432,52 @@ boot_uart_fifo_init(void)
 	cur = 0;
 
 	uart_irq_rx_enable(uart_dev);
+
+#elif defined(CONFIG_BOOT_SERIAL_CDC_ACM)
+
+	uint32_t waited_ms;
+	int rc;
+
+	rc = boot_usb_cdc_serial_init();
+	if (rc) {
+		return (-1);
+	}
+
+	rc = usbd_enable(boot_usb_cdc_serial_get_context());
+	if (rc) {
+		return (-1);
+	}
+
+	/* Wait for the USB host to open the serial port, feeding the watchdog
+	 * meanwhile: the serial recovery loop that would otherwise feed it is
+	 * not reached until this returns. Give up once the caller's own timeout
+	 * would have expired, so a timed wait still falls through to boot.
+	 */
+	waited_ms = 0;
+	while (k_sem_take(&boot_cdc_acm_ready, K_MSEC(BOOT_CDC_ACM_POLL_MS)) != 0) {
+#if CONFIG_BOOT_WATCHDOG_FEED
+		MCUBOOT_WATCHDOG_FEED();
+#endif
+		waited_ms += BOOT_CDC_ACM_POLL_MS;
+
+		if (BOOT_CDC_ACM_READY_TIMEOUT_MS != 0 &&
+		    waited_ms >= BOOT_CDC_ACM_READY_TIMEOUT_MS) {
+			break;
+		}
+	}
+
+	uart_dev = DEVICE_DT_GET_ONE(zephyr_cdc_acm_uart);
+	if (!device_is_ready(uart_dev)) {
+		return (-1);
+	}
+
+	uart_irq_callback_set(uart_dev, boot_uart_fifo_callback);
+	cur = 0;
+	uart_irq_rx_enable(uart_dev);
+
+#else
+#error No serial recovery device selected
+#endif
 
 	return 0;
 }

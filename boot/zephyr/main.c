@@ -26,7 +26,6 @@
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/sys/__assert.h>
-#include <zephyr/usb/usb_device.h>
 #include <soc.h>
 
 #include "io/io.h"
@@ -63,8 +62,18 @@ const struct boot_uart_funcs boot_funcs = {
 };
 #endif
 
-#if defined(CONFIG_BOOT_USB_DFU_WAIT) || defined(CONFIG_BOOT_USB_DFU_GPIO)
-#include <zephyr/usb/class/usb_dfu.h>
+#ifdef CONFIG_BOOT_USB_DFU
+#include "usbd_dfu.h"
+#endif
+
+/* The log backend writes to the console UART, so it can only coexist with UART
+ * serial recovery when mcumgr has been pointed at a different UART.
+ */
+#if defined(CONFIG_BOOT_SERIAL_UART) && defined(CONFIG_LOG_BACKEND_UART) && \
+    (!DT_HAS_CHOSEN(zephyr_uart_mcumgr) ||                                  \
+     DT_SAME_NODE(DT_CHOSEN(zephyr_uart_mcumgr), DT_CHOSEN(zephyr_console)))
+#error "UART serial recovery and the UART log backend cannot share one UART; \
+        select a separate one with the zephyr,uart-mcumgr chosen node"
 #endif
 
 #if defined(CONFIG_LOG)
@@ -228,6 +237,11 @@ int main(void)
     bool usb_dfu_requested = false;
     bool usb_dfu_forever = false;
 #endif
+#if (defined(CONFIG_MCUBOOT_SERIAL) || defined(CONFIG_BOOT_USB_DFU)) && \
+    (defined(CONFIG_BOOT_SWAP_USING_SCRATCH) || defined(CONFIG_BOOT_UPGRADE_ONLY) || \
+     defined(CONFIG_BOOT_SWAP_USING_OFFSET) || defined(CONFIG_BOOT_SWAP_USING_MOVE))
+    bool has_upgrade;
+#endif
     FIH_DECLARE(fih_rc, FIH_FAILURE);
 
     MCUBOOT_WATCHDOG_SETUP();
@@ -260,78 +274,97 @@ int main(void)
     }
 #endif /* CONFIG_MCUBOOT_UUID_VID || CONFIG_MCUBOOT_UUID_CID */
 
+#if (defined(CONFIG_MCUBOOT_SERIAL) || defined(CONFIG_BOOT_USB_DFU)) && \
+    (defined(CONFIG_BOOT_SWAP_USING_SCRATCH) || defined(CONFIG_BOOT_UPGRADE_ONLY) || \
+     defined(CONFIG_BOOT_SWAP_USING_OFFSET) || defined(CONFIG_BOOT_SWAP_USING_MOVE))
+    /*
+     * If MCUboot is part the way through an update, prevent entering serial recovery/USB DFU
+     * modes to prevent tampering with the image data which prevents allowing un-verified data
+     * from being used as genuine.
+     */
+    has_upgrade = boot_check_for_updates();
+
+    if (has_upgrade) {
+        BOOT_LOG_INF("Update already in progress, USB/serial recovery mode checking skipped");
+    } else {
+#endif
 #ifdef CONFIG_BOOT_SERIAL_ENTRANCE_GPIO
-    BOOT_LOG_DBG("Checking GPIO for serial recovery");
-    if (io_detect_pin() &&
-            !io_boot_skip_serial_recovery()) {
-        boot_serial_enter(0);
-    }
+        BOOT_LOG_DBG("Checking GPIO for serial recovery");
+        if (io_detect_pin() &&
+                !io_boot_skip_serial_recovery()) {
+            boot_serial_enter(0);
+        }
 #endif
 
 #ifdef CONFIG_BOOT_SERIAL_PIN_RESET
-    BOOT_LOG_DBG("Checking RESET pin for serial recovery");
-    if (io_detect_pin_reset()) {
-        boot_serial_enter(0);
-    }
+        BOOT_LOG_DBG("Checking RESET pin for serial recovery");
+        if (io_detect_pin_reset()) {
+            boot_serial_enter(0);
+        }
 #endif
 
 #if defined(CONFIG_BOOT_USB_DFU_GPIO)
-    BOOT_LOG_DBG("Checking GPIO for USB DFU request");
-    if (io_detect_pin()) {
-        BOOT_LOG_DBG("Entering USB DFU");
+        BOOT_LOG_DBG("Checking GPIO for USB DFU request");
+        if (io_detect_pin()) {
+            BOOT_LOG_DBG("Entering USB DFU");
 
+            usb_dfu_requested = true;
+            usb_dfu_forever = true;
+
+#ifdef CONFIG_MCUBOOT_INDICATION_LED
+            io_led_set(1);
+#endif
+
+            mcuboot_status_change(MCUBOOT_STATUS_USB_DFU_ENTERED);
+        }
+#endif
+
+#if defined(CONFIG_BOOT_USB_DFU_WAIT)
         usb_dfu_requested = true;
-        usb_dfu_forever = true;
+#endif
+
+#if defined(CONFIG_BOOT_USB_DFU_GPIO) || defined(CONFIG_BOOT_USB_DFU_WAIT)
+        if (usb_dfu_requested) {
+            rc = boot_usb_dfu_enable();
+            if (rc) {
+                BOOT_LOG_ERR("Cannot enable USB: %d", rc);
+            } else {
+                BOOT_LOG_INF("Waiting for USB DFU");
+
+                if (usb_dfu_forever) {
+                    boot_usb_dfu_wait(K_FOREVER);
+                    BOOT_LOG_INF("USB DFU wait terminated");
+#if defined(CONFIG_BOOT_USB_DFU_WAIT)
+                } else {
+                    BOOT_LOG_DBG("Waiting for USB DFU for %dms", CONFIG_BOOT_USB_DFU_WAIT_DELAY_MS);
+                    mcuboot_status_change(MCUBOOT_STATUS_USB_DFU_WAITING);
+                    boot_usb_dfu_wait(K_MSEC(CONFIG_BOOT_USB_DFU_WAIT_DELAY_MS));
+                    BOOT_LOG_INF("USB DFU wait time elapsed");
+                    mcuboot_status_change(MCUBOOT_STATUS_USB_DFU_TIMED_OUT);
+#endif
+                }
+            }
+        }
+#endif
+
+#ifdef CONFIG_BOOT_SERIAL_WAIT_FOR_DFU
+        /* Initialize the boot console, so we can already fill up our buffers while
+         * waiting for the boot image check to finish. This image check, can take
+         * some time, so it's better to reuse thistime to already receive the
+         * initial mcumgr command(s) into our buffers
+         */
+        rc = boot_console_init();
+        int timeout_in_ms = CONFIG_BOOT_SERIAL_WAIT_FOR_DFU_TIMEOUT;
+        uint32_t start = k_uptime_get_32();
 
 #ifdef CONFIG_MCUBOOT_INDICATION_LED
         io_led_set(1);
 #endif
-
-        mcuboot_status_change(MCUBOOT_STATUS_USB_DFU_ENTERED);
+#endif
+#if (defined(CONFIG_MCUBOOT_SERIAL) || defined(CONFIG_BOOT_USB_DFU)) && \
+    (defined(CONFIG_BOOT_SWAP_USING_SCRATCH) || defined(CONFIG_BOOT_UPGRADE_ONLY) || \
+     defined(CONFIG_BOOT_SWAP_USING_OFFSET) || defined(CONFIG_BOOT_SWAP_USING_MOVE))
     }
-#endif
-
-#if defined(CONFIG_BOOT_USB_DFU_WAIT)
-    usb_dfu_requested = true;
-#endif
-
-#if defined(CONFIG_BOOT_USB_DFU_GPIO) || defined(CONFIG_BOOT_USB_DFU_WAIT)
-    if (usb_dfu_requested) {
-        rc = usb_enable(NULL);
-        if (rc) {
-            BOOT_LOG_ERR("Cannot enable USB: %d", rc);
-        } else {
-            BOOT_LOG_INF("Waiting for USB DFU");
-
-            if (usb_dfu_forever) {
-                wait_for_usb_dfu(K_FOREVER);
-                BOOT_LOG_INF("USB DFU wait terminated");
-#if defined(CONFIG_BOOT_USB_DFU_WAIT)
-            } else {
-                BOOT_LOG_DBG("Waiting for USB DFU for %dms", CONFIG_BOOT_USB_DFU_WAIT_DELAY_MS);
-                mcuboot_status_change(MCUBOOT_STATUS_USB_DFU_WAITING);
-                wait_for_usb_dfu(K_MSEC(CONFIG_BOOT_USB_DFU_WAIT_DELAY_MS));
-                BOOT_LOG_INF("USB DFU wait time elapsed");
-                mcuboot_status_change(MCUBOOT_STATUS_USB_DFU_TIMED_OUT);
-#endif
-            }
-        }
-    }
-#endif
-
-#ifdef CONFIG_BOOT_SERIAL_WAIT_FOR_DFU
-    /* Initialize the boot console, so we can already fill up our buffers while
-     * waiting for the boot image check to finish. This image check, can take
-     * some time, so it's better to reuse thistime to already receive the
-     * initial mcumgr command(s) into our buffers
-     */
-    rc = boot_console_init();
-    int timeout_in_ms = CONFIG_BOOT_SERIAL_WAIT_FOR_DFU_TIMEOUT;
-    uint32_t start = k_uptime_get_32();
-
-#ifdef CONFIG_MCUBOOT_INDICATION_LED
-    io_led_set(1);
-#endif
 #endif
 
     BOOT_HOOK_GO_CALL_FIH(boot_go_hook, FIH_BOOT_HOOK_REGULAR, fih_rc, &rsp);
@@ -340,49 +373,65 @@ int main(void)
     }
     BOOT_LOG_DBG("Left boot_go with success == %d", FIH_EQ(fih_rc, FIH_SUCCESS) ? 1 : 0);
 
-#ifdef CONFIG_BOOT_SERIAL_BOOT_MODE
-    if (io_detect_boot_mode()) {
-        /* Boot mode to stay in bootloader, clear status and enter serial
-         * recovery mode
-         */
-        BOOT_LOG_DBG("Staying in serial recovery");
-#ifdef MCUBOOT_SERIAL_INACTIVITY_TIMEOUT
-        boot_serial_enter(MCUBOOT_SERIAL_INACTIVITY_TIMEOUT);
-#else
-        boot_serial_enter(0);
+#if (defined(CONFIG_MCUBOOT_SERIAL) || defined(CONFIG_BOOT_USB_DFU)) && \
+    (defined(CONFIG_BOOT_SWAP_USING_SCRATCH) || defined(CONFIG_BOOT_UPGRADE_ONLY) || \
+     defined(CONFIG_BOOT_SWAP_USING_OFFSET) || defined(CONFIG_BOOT_SWAP_USING_MOVE))
+/*
+ * At this point, upgrades have been dealt with so it is safe to boot into serial recovery/DFU
+ * mode, however doing so with a image set to test would mean that after exiting serial
+ * recovery/DFU, the device would reboot and the image would be instantly reverted without ever
+ * running it, therefore allow it to boot properly once
+ */
+    if (!has_upgrade) {
 #endif
-    }
+#ifdef CONFIG_BOOT_SERIAL_BOOT_MODE
+        if (io_detect_boot_mode()) {
+            /* Boot mode to stay in bootloader, clear status and enter serial
+             * recovery mode
+             */
+            BOOT_LOG_DBG("Staying in serial recovery");
+#ifdef MCUBOOT_SERIAL_INACTIVITY_TIMEOUT
+            boot_serial_enter(MCUBOOT_SERIAL_INACTIVITY_TIMEOUT);
+#else
+            boot_serial_enter(0);
+#endif
+        }
 #endif
 
 #ifdef CONFIG_BOOT_SERIAL_WAIT_FOR_DFU
-    timeout_in_ms -= (k_uptime_get_32() - start);
-    if( timeout_in_ms <= 0 ) {
-        /* at least one check if time was expired */
-        timeout_in_ms = 1;
-    }
+        timeout_in_ms -= (k_uptime_get_32() - start);
+        if( timeout_in_ms <= 0 ) {
+            /* at least one check if time was expired */
+            timeout_in_ms = 1;
+        }
 #ifdef MCUBOOT_SERIAL_INACTIVITY_TIMEOUT
-    if (boot_serial_start_inactivity(&boot_funcs, timeout_in_ms,
-                                     MCUBOOT_SERIAL_INACTIVITY_TIMEOUT)) {
-        /* Reset rather than continue: boot_go() already selected an image
-         * before this window opened, so continuing would boot whatever the
-         * upload just replaced. A window with no command is not a session
-         * and boots as usual.
-         */
-        BOOT_LOG_INF("Serial recovery idle for %d ms, resetting",
-                     MCUBOOT_SERIAL_INACTIVITY_TIMEOUT);
+        if (boot_serial_start_inactivity(&boot_funcs, timeout_in_ms,
+                                         MCUBOOT_SERIAL_INACTIVITY_TIMEOUT)) {
+            /* Reset rather than continue: boot_go() already selected an image
+             * before this window opened, so continuing would boot whatever the
+             * upload just replaced. A window with no command is not a session
+             * and boots as usual.
+             */
+            BOOT_LOG_INF("Serial recovery idle for %d ms, resetting",
+                         MCUBOOT_SERIAL_INACTIVITY_TIMEOUT);
 #ifdef CONFIG_MCUBOOT_INDICATION_LED
-        io_led_set(0);
+            io_led_set(0);
 #endif
-        ZEPHYR_BOOT_LOG_STOP();
-        sys_reboot(SYS_REBOOT_COLD);
-    }
+            ZEPHYR_BOOT_LOG_STOP();
+            sys_reboot(SYS_REBOOT_COLD);
+        }
 #else
-    boot_serial_check_start(&boot_funcs,timeout_in_ms);
+        boot_serial_check_start(&boot_funcs,timeout_in_ms);
 #endif
 
 #ifdef CONFIG_MCUBOOT_INDICATION_LED
-    io_led_set(0);
+        io_led_set(0);
 #endif
+#endif
+#if (defined(CONFIG_MCUBOOT_SERIAL) || defined(CONFIG_BOOT_USB_DFU)) && \
+    (defined(CONFIG_BOOT_SWAP_USING_SCRATCH) || defined(CONFIG_BOOT_UPGRADE_ONLY) || \
+     defined(CONFIG_BOOT_SWAP_USING_OFFSET) || defined(CONFIG_BOOT_SWAP_USING_MOVE))
+    }
 #endif
 
     if (FIH_NOT_EQ(fih_rc, FIH_SUCCESS)) {
@@ -396,12 +445,12 @@ int main(void)
          */
         boot_serial_enter(0);
 #elif defined(CONFIG_BOOT_USB_DFU_NO_APPLICATION)
-        rc = usb_enable(NULL);
+        rc = boot_usb_dfu_enable();
         if (rc && rc != -EALREADY) {
             BOOT_LOG_ERR("Cannot enable USB");
         } else {
             BOOT_LOG_INF("Waiting for USB DFU");
-            wait_for_usb_dfu(K_FOREVER);
+            boot_usb_dfu_wait(K_FOREVER);
         }
 #endif
 
@@ -433,7 +482,14 @@ int main(void)
     stage1_services_publish();
 #endif
 
+    BOOT_HOOK_IMAGE_JUMP_CALL_FIH(boot_image_jump_hook, fih_rc, &rsp);
+    if (FIH_NOT_EQ(fih_rc, FIH_SUCCESS)) {
+        BOOT_LOG_ERR("boot_image_jump_hook failed");
+        FIH_PANIC;
+    }
+
     ZEPHYR_BOOT_LOG_STOP();
+
     do_boot(&rsp);
 
     mcuboot_status_change(MCUBOOT_STATUS_BOOT_FAILED);
